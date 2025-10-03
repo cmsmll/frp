@@ -77,7 +77,7 @@ impl Server {
             let mut buf = [0; 512];
             let n = tcp.read(&mut buf).await.unwrap();
 
-            match bitcode::decode::<Message>(&buf[..n].trim_ascii_end()) {
+            match bitcode::decode::<Message>(buf[..n].trim_ascii_end()) {
                 Ok(Message::Master(secret)) if secret == server.config.secret => {
                     let (addr, handle) = new_worker(server.clone()).await.unwrap();
                     Message::Worker(addr).send(&mut tcp).await.ok();
