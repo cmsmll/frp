@@ -9,4 +9,9 @@ clap = { version = "4.5.48", features = ["derive"] }
 tokio = { version = "1.47.1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 bitcode = { version = "0.6.7", features = ["derive"] }
-crossbeam-channel = "0.5.15"
+async-channel = "2.5.0"
+tikv-jemallocator = "0.6.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
