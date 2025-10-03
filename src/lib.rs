@@ -57,8 +57,7 @@ impl Message {
     where
         T: AsyncWriteExt + Unpin,
     {
-        let src = self.to_vec();
-        writer.write_all(&src).await?;
+        writer.write_all(&self.to_vec()).await?;
         writer.flush().await
     }
 }
