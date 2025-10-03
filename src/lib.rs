@@ -7,6 +7,8 @@ use tokio::{
     net::TcpStream,
 };
 
+pub mod server;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub secret: String,
