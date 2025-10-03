@@ -1,4 +1,8 @@
-use std::{fs, net::SocketAddr, time::Duration};
+use std::{
+    fs,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use bitcode::{Decode, Encode};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -7,6 +11,7 @@ use tokio::{
     net::TcpStream,
 };
 
+pub mod client;
 pub mod server;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,6 +51,7 @@ pub enum Message {
 
 impl Message {
     pub fn from_buf(buf: &[u8]) -> io::Result<Self> {
+        let buf = buf.trim_ascii_end();
         bitcode::decode(buf).map_err(|err| io::Error::other(format!("反序列化失败: {err}")))
     }
 
@@ -64,10 +70,10 @@ impl Message {
     }
 }
 
-pub fn forward(from: TcpStream, to: TcpStream) {
+pub fn forward(mut from: TcpStream, mut to: TcpStream) {
     tokio::spawn(async move {
-        let (mut fr, mut fw) = from.into_split();
-        let (mut tr, mut tw) = to.into_split();
-        tokio::try_join!(io::copy(&mut fr, &mut tw), io::copy(&mut tr, &mut fw))
+        let now = Instant::now();
+        io::copy_bidirectional(&mut from, &mut to).await.ok();
+        println!("耗时: {:.2?}", now.elapsed())
     });
 }
