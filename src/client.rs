@@ -38,9 +38,10 @@ impl Client {
             let mut reader = BufReader::new(reader);
             let mut addr: Arc<SocketAddr> = Arc::new("0.0.0.0:65535".parse().unwrap());
             let mut buf = Vec::with_capacity(1 << 10);
-            while let Ok(true) = reader.read_until(b'\n', &mut buf).await.map(|n| n > 1) {
+
+            while let Ok(1..) = reader.read_until(b'\n', &mut buf).await {
                 match Message::from_buf(&buf) {
-                    Err(err) => eprintln!("Serialization Failed:{err} Content:{}", String::from_utf8_lossy(&buf)),
+                    Err(err) => eprintln!("Serialization Failed:{err}"),
                     Ok(msg) => match msg {
                         Message::New => new_worker(client.clone(), addr.clone()).await,
                         Message::Msg(msg) => println!("{msg}"),
@@ -67,11 +68,9 @@ impl Client {
         });
 
         tokio::select! {
-            _ = reader_handle => {},
-            _ = writer_handle => {},
+            _ = reader_handle => Ok(()),
+            _ = writer_handle => Ok(()),
         }
-
-        Ok(())
     }
 }
 

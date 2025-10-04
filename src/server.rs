@@ -45,7 +45,7 @@ impl Proxy {
         println!("│{:21?}│ MasterLister", config.server_addr);
         while let Ok(tcp) = master.accept().await {
             if let Err(err) = Self::new(tcp, config.clone()).await {
-                println!("{err}");
+                eprintln!("{err}");
             }
         }
         Ok(())
