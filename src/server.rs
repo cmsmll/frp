@@ -1,17 +1,14 @@
 use std::{
-    net::SocketAddr,
+    io::{self, Error},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use async_channel::{Receiver, Sender, unbounded};
 use tokio::{
-    io::{self, AsyncReadExt, AsyncWriteExt},
-    net::{
-        TcpListener, TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
-    task::JoinHandle,
+    io::AsyncReadExt,
+    net::{TcpListener, TcpStream},
     time::sleep,
 };
 
@@ -34,131 +31,140 @@ impl Accept {
     }
 }
 
-pub struct Server {
-    config: Config,
-    mt: Sender<Message>,
-    mr: Receiver<Message>,
+pub struct Proxy {
+    config: Arc<Config>,
+    ct: Sender<Message>,
+    cr: Receiver<Message>,
     at: Sender<Accept>,
     ar: Receiver<Accept>,
 }
 
-impl Server {
-    pub const NO_MASTER: &'static [u8; 30] = b"HTTP/1.1 555 No Master Connect";
-
-    pub fn new(config: Config) -> Arc<Self> {
-        let (at, ar) = unbounded();
-        let (mt, mr) = unbounded();
-        Arc::new(Self { config, mt, mr, ar, at })
-    }
-
-    pub async fn run(self: &Arc<Self>) -> io::Result<()> {
-        let master = TcpListener::bind(&self.config.server_addr).await?;
-        let accept = TcpListener::bind(&self.config.accept_addr).await?;
-        println!("│{:21?}│ AcceptListen", self.config.accept_addr);
-        println!("│{:21?}│ MasterLister", self.config.server_addr);
-        loop {
-            tokio::select! {
-                Ok(tcp) = master.accept() => self.master(tcp),
-                Ok(tcp) = accept.accept() => self.accept(tcp),
-                else => return Ok(()),
+impl Proxy {
+    pub async fn run(config: Arc<Config>) -> io::Result<()> {
+        let master = TcpListener::bind(&config.server_addr).await?;
+        println!("│{:21?}│ MasterLister", config.server_addr);
+        while let Ok(tcp) = master.accept().await {
+            if let Err(err) = Self::new(tcp, config.clone()).await {
+                println!("{err}");
             }
         }
-    }
-    /// 处理连接
-    pub fn master(self: &Arc<Self>, (mut tcp, _): (TcpStream, SocketAddr)) {
-        let server = self.clone();
-        tokio::spawn(async move {
-            if server.mr.receiver_count() > 2 {
-                let msg = Message::Error("Master already exists".to_string());
-                msg.send(&mut tcp).await.ok();
-                return;
-            }
-
-            let mut buf = [0; 512];
-            let n = tcp.read(&mut buf).await.unwrap();
-
-            match Message::from_buf(&buf[..n]) {
-                Ok(Message::Master(secret)) if secret == server.config.secret => {
-                    let (addr, handle) = new_worker(server.clone()).await.unwrap();
-                    Message::Worker(addr).send(&mut tcp).await.ok();
-                    let (reader, wirter) = tcp.into_split();
-
-                    println!("│{:21?}│ WorkerListen", addr);
-                    tokio::spawn(async move {
-                        let err = tokio::select! {
-                            Err(err) = reader_handle(server.mr.clone(),reader) => err,
-                            Err(err) = writer_handle(server,wirter) => err
-                        };
-                        handle.abort();
-                        eprintln!("│{:21?}│ ⇨ Master {} ", addr, err)
-                    });
-                }
-                _ => {
-                    let msg = Message::Error("Master Scret Format Error".to_string());
-                    msg.send(&mut tcp).await.ok();
-                }
-            }
-        });
+        Ok(())
     }
 
-    /// 处理访问
-    pub fn accept(self: &Arc<Self>, (mut tcp, addr): (TcpStream, SocketAddr)) {
-        let server = self.clone();
-        tokio::spawn(async move {
-            match server.mr.receiver_count() {
-                1..=2 => {
-                    println!("│{:21?}│ ⇦ Accept No Master Connect", addr);
-                    tcp.write_all(Self::NO_MASTER).await.ok();
-                    tcp.flush().await.ok();
+    pub async fn new(mut tcp: (TcpStream, SocketAddr), config: Arc<Config>) -> Result<Arc<Self>, String> {
+        let mut buf = [0; 512];
+        let n = tcp.0.read(&mut buf).await.map_err(|e| e.to_string())?;
+        let mut msg = "Scret Error".to_string();
+
+        if let Ok(Message::Master(master)) = Message::from_buf(&buf[..n])
+            && master.secret == config.secret
+        {
+            match TcpListener::bind(master.access).await {
+                Ok(accept) => {
+                    let (worker, worker_addr) = random_listen(config.server_addr.ip()).await;
+                    if let Err(err) = Message::Worker(worker_addr).send(&mut tcp.0).await {
+                        return Err(format!("发送Worker地址失败: {err}"));
+                    };
+                    let (ct, cr) = unbounded();
+                    let (at, ar) = unbounded();
+                    let proxy = Arc::new(Self { ct, cr, at, ar, config });
+                    println!("\n===========客户端加入连接===========");
+                    println!("│{:21?}│ ProxyConnect", tcp.1);
+                    println!("│{:21?}│ AcceptListen", master.access);
+                    println!("│{:21?}│ WorkerListen", worker_addr);
+                    proxy.run_master(tcp);
+                    proxy.run_worker(worker);
+                    proxy.run_accept(accept);
+                    return Ok(proxy);
                 }
-                3 => {
-                    server.mt.send(Message::New).await.unwrap();
-                    server.at.send(Accept::new(tcp, addr)).await.unwrap();
-                }
-                _ => panic!("ACCEPT FRP INNER ERROR"),
+                Err(err) => msg = format!("创建 Accept Listener 失败: {err}"),
             };
+        }
+
+        Message::Error(msg.clone()).send(&mut tcp.0).await.ok();
+        Err(msg)
+    }
+
+    /// 建立主连接
+    pub fn run_master(self: &Arc<Self>, (mut tcp, addr): (TcpStream, SocketAddr)) {
+        let proxy = self.clone();
+        let heartbeat = proxy.config.heartbeat;
+        tokio::spawn(async move {
+            let (mut reader, mut writer) = tcp.split();
+            let mut buf = [0; 256];
+            let err: Error;
+            loop {
+                tokio::select! {
+                    Ok(msg) = proxy.cr.recv() => if let Err(e) = msg.send(&mut writer).await { break err = e },
+                    Ok(n) = reader.read(&mut buf) => if n == 0 { break err = io::Error::other("EOF") },
+                    _ = sleep(heartbeat) => if let Err(e) = Message::Ping.send(&mut writer).await { break err = e },
+                    else => { break err = io::Error::other("其他原因") }
+                }
+            }
+            proxy.close(); // 关闭所有通道
+            println!("│{:21?}│ 连接断开 {err}", addr);
+            println!("===========客户端连接断开===========");
         });
     }
-}
 
-async fn writer_handle(server: Arc<Server>, mut writer: OwnedWriteHalf) -> io::Result<()> {
-    let mr = server.mr.clone();
-    loop {
-        tokio::select! {
-            Ok(msg) = mr.recv() =>msg.send(&mut writer).await?,
-            _ = sleep(server.config.heartbeat) =>Message::Ping.send(&mut writer).await?
-        }
-    }
-}
-
-async fn reader_handle(_master_rx: Receiver<Message>, mut reader: OwnedReadHalf) -> io::Result<()> {
-    let mut buf = [0; 256];
-    while let Ok(true) = reader.read(&mut buf).await.map(|n| n > 1) {}
-    Err(io::Error::other("Connect Disconnected"))
-}
-
-async fn new_worker(server: Arc<Server>) -> io::Result<(SocketAddr, JoinHandle<()>)> {
-    for port in 0xAAAA..0xFFFF {
-        let addr = SocketAddr::new(server.config.server_addr.ip(), port);
-        if let Ok(worker) = TcpListener::bind(addr).await {
-            let task = tokio::spawn(async move {
-                while let Ok((tcp, addr)) = worker.accept().await {
-                    let server = server.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            match server.ar.try_recv() {
-                                Ok(from) => match !from.is_timeout(server.config.timeout) {
-                                    true => return forward(from.tcp, tcp),
-                                    false => eprintln!("│{:21?}│ ⇨ Accept Wati Timeout", from.addr),
-                                },
-                                Err(_) => return eprintln!("│{:21?}│ ⇨ Worker Ready But No Accept", addr),
-                            }
-                        }
-                    });
+    /// 监听用户访问
+    pub fn run_accept(self: &Arc<Self>, accept: TcpListener) {
+        let proxy = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                   Ok((tcp, addr)) = accept.accept() => if let (Err(_), _) | (_, Err(_)) = (
+                       proxy.ct.send(Message::New).await,
+                       proxy.at.send(Accept::new(tcp, addr)).await,
+                   ) { break },
+                   _ = proxy.at.closed() => break,
+                   else => break,
                 }
-            });
-            return Ok((addr, task));
+            }
+        });
+    }
+
+    pub fn run_worker(self: &Arc<Self>, worker: TcpListener) {
+        let proxy = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                   Ok((tcp, addr)) = worker.accept() => worker_swap_accept(proxy.clone(), tcp, addr),
+                   _ = proxy.at.closed() => break,
+                   else => break,
+                }
+            }
+        });
+    }
+
+    pub fn close(self: &Arc<Self>) {
+        self.ct.close();
+        self.cr.close();
+        self.at.close();
+        self.ar.close();
+    }
+}
+
+fn worker_swap_accept(proxy: Arc<Proxy>, tcp: TcpStream, addr: SocketAddr) {
+    tokio::spawn(async move {
+        loop {
+            match proxy.ar.try_recv() {
+                Ok(from) => match !from.is_timeout(proxy.config.timeout) {
+                    true => return forward(from.tcp, tcp),
+                    false => eprintln!("│{:21?}│ ⇨ Accept Wati Timeout", from.addr),
+                },
+                Err(_) => return eprintln!("│{:21?}│ ⇨ Worker Ready But No Accept", addr),
+            }
+        }
+    });
+}
+
+async fn random_listen(ip: IpAddr) -> (TcpListener, SocketAddr) {
+    loop {
+        let port = rand::random_range(0xAAAA..0xFFFF);
+        let addr = SocketAddr::new(ip, port);
+        if let Ok(linten) = TcpListener::bind(addr).await {
+            return (linten, addr);
         }
     }
-    Err(io::Error::other("Listen Worker Faild"))
 }

@@ -32,6 +32,19 @@ impl Config {
         let data = fs::read_to_string(path)?;
         toml::from_str(&data).map_err(io::Error::other)
     }
+
+    pub fn build_master(&self) -> Master {
+        Master {
+            secret: self.secret.clone(),
+            access: self.accept_addr,
+        }
+    }
+}
+
+#[derive(Debug, Encode, Decode)]
+pub struct Master {
+    pub secret: String,
+    pub access: SocketAddr,
 }
 
 #[derive(Debug, Encode, Decode)]
@@ -41,7 +54,7 @@ pub enum Message {
     Pong,
     Msg(String),
     Error(String),
-    Master(String),
+    Master(Master),
     Worker(SocketAddr),
 }
 

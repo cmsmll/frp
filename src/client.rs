@@ -25,10 +25,11 @@ impl Client {
             Err(_) => return Ok(eprintln!("Master Conntec Timeout")),
         };
 
+        println!("│{:21?}│ AcceptAddress", self.config.accept_addr);
         println!("│{:21?}│ ClientConnect", self.config.client_addr);
         println!("│{:21?}│ MasterConnect", self.config.server_addr);
         let (reader, mut writer) = master.into_split();
-        let secret = Message::Master(self.config.secret.clone());
+        let secret = Message::Master(self.config.build_master());
         secret.send(&mut writer).await.ok();
 
         let client = self.clone();

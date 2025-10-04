@@ -1,7 +1,7 @@
 use std::io;
 
 use clap::Parser;
-use frp::{Config, client::Client, server::Server};
+use frp::{Config, client::Client, server::Proxy};
 
 use tikv_jemallocator::Jemalloc;
 
@@ -37,8 +37,7 @@ impl Cli {
             }
             Cli::Server(arg) => {
                 let config = Config::load(&arg.path)?;
-                let server = Server::new(config);
-                server.run().await?;
+                Proxy::run(config.into()).await?;
             }
         };
         Ok(())
