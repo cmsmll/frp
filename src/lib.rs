@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::{fs, net::SocketAddr, time::Duration};
 
 use bitcode::{Decode, Encode};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -72,8 +68,6 @@ impl Message {
 
 pub fn forward(mut from: TcpStream, mut to: TcpStream) {
     tokio::spawn(async move {
-        let now = Instant::now();
         io::copy_bidirectional(&mut from, &mut to).await.ok();
-        println!("耗时: {:.2?}", now.elapsed())
     });
 }

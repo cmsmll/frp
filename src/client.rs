@@ -38,8 +38,7 @@ impl Client {
             let mut addr: Arc<SocketAddr> = Arc::new("0.0.0.0:65535".parse().unwrap());
             let mut buf = Vec::with_capacity(1 << 10);
             while let Ok(true) = reader.read_until(b'\n', &mut buf).await.map(|n| n > 1) {
-                let buf2 = &buf[0..buf.len() - 1];
-                match Message::from_buf(buf2) {
+                match Message::from_buf(&buf) {
                     Err(err) => eprintln!("Serialization Failed:{err} Content:{}", String::from_utf8_lossy(&buf)),
                     Ok(msg) => match msg {
                         Message::New => new_worker(client.clone(), addr.clone()).await,
